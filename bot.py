@@ -4,7 +4,12 @@ import os
 import sys
 from pathlib import Path
 
+from urllib.parse import urlparse
+
 import requests
+
+# Запасной фильтр по тексту, если не удалось определить конечный сайт
+BLOCK_WORDS = ("alienware", "indiegala", "fanatical", "gleam.io", "reddit")
 
 API_URL = "https://www.gamerpower.com/api/giveaways"
 SEEN_FILE = Path("seen.json")
@@ -35,6 +40,30 @@ def fetch_giveaways() -> list[dict]:
         return []
     data = r.json()
     return data if isinstance(data, list) else []
+
+
+def is_steam_native(g: dict) -> bool:
+    """True, если раздача забирается прямо в Steam, а не на стороннем сайте."""
+    try:
+        r = requests.get(
+            g["open_giveaway_url"],
+            timeout=20,
+            allow_redirects=True,
+            stream=True,
+        )
+        host = urlparse(r.url).netloc.lower()
+        r.close()
+        if host.endswith("steampowered.com") or host.endswith("steamcommunity.com"):
+            return True
+        if not host.endswith("gamerpower.com"):
+            return False  # привело на другой сайт (Alienware и т.п.)
+    except requests.RequestException:
+        pass
+    # Редирект не удалось определить: проверяем по тексту
+    text = " ".join(
+        str(g.get(k, "")) for k in ("title", "description", "instructions")
+    ).lower()
+    return not any(w in text for w in BLOCK_WORDS)
 
 
 def build_message(g: dict) -> str:
@@ -72,6 +101,10 @@ def main() -> None:
         if g.get("status") != "Active" or g.get("type") != "Game":
             continue
         if g["id"] in seen:
+            continue
+        if not is_steam_native(g):
+            seen.append(g["id"])  # запоминаем, чтобы не проверять снова
+            print(f"Пропущено (не Steam): {g['title']}")
             continue
         try:
             send(build_message(g))
